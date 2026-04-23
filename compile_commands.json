@@ -1,0 +1,22 @@
+[
+    {
+        "directory": "/Users/olivercruickshank/petey",
+        "command": "clang -std=c23 -ObjC -fobjc-arc -c source/render.m -g -O0 -obuild/source/render.o -Iinclude/ -Iembed/  ",
+        "file": "source/render.m"
+    },
+    {
+        "directory": "/Users/olivercruickshank/petey",
+        "command": "clang -std=c23 -ObjC -fobjc-arc -c source/window.m -g -O0 -obuild/source/window.o -Iinclude/ -Iembed/  ",
+        "file": "source/window.m"
+    },
+    {
+        "directory": "/Users/olivercruickshank/petey",
+        "command": "clang -std=c23  -c ext/ufbx.c -g -O0 -obuild/ext/ufbx.o -Iinclude/ -Iembed/  ",
+        "file": "ext/ufbx.c"
+    },
+    {
+        "directory": "/Users/olivercruickshank/petey",
+        "command": "clang -std=c23  -c embed/shaders.c -g -O0 -obuild/embed/shaders.o -Iinclude/ -Iembed/  ",
+        "file": "embed/shaders.c"
+    }
+]
