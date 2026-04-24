@@ -1,13 +1,8 @@
 [
     {
         "directory": "/Users/olivercruickshank/petey",
-        "command": "clang -std=c23 -ObjC -fobjc-arc -c source/render.m -g -O0 -obuild/source/render.o -Iinclude/ -Iembed/  ",
-        "file": "source/render.m"
-    },
-    {
-        "directory": "/Users/olivercruickshank/petey",
-        "command": "clang -std=c23 -ObjC -fobjc-arc -c source/window.m -g -O0 -obuild/source/window.o -Iinclude/ -Iembed/  ",
-        "file": "source/window.m"
+        "command": "clang -std=c23 -ObjC -fobjc-arc -c source/petey.m -g -O0 -obuild/source/petey.o -Iinclude/ -Iembed/  ",
+        "file": "source/petey.m"
     },
     {
         "directory": "/Users/olivercruickshank/petey",
