@@ -34,7 +34,7 @@ inline float Rand(thread uint& State)
 	State = State * 747796405u + 2891336453u;
 	uint Word = ((State >> ((State >> 28u) + 4u)) ^ State) * 277803737u;
 	Word = (Word >> 22u) ^ Word;
-	return float(Word) * (1.0f / 4294967296.0f);
+	return float(Word) * (1.0 / 4294967296.0f);
 }
 
 inline float3 CosineSampleHemisphere(float2 U)
@@ -122,7 +122,8 @@ kernel void Raytrace(
     device const uint *Indices            [[buffer(2)]],
     device const mesh_info *MeshInfos     [[buffer(3)]],
     device const float3 *InstanceNormals  [[buffer(4)]],
-    texture2d<float, access::write> OutImage [[texture(0)]],
+	device const int *Frame               [[buffer(5)]],
+    texture2d<float, access::read_write> OutImage [[texture(0)]],
     uint2 PositionInGrid [[thread_position_in_grid]])
 {
 	if (PositionInGrid.x >= OutImage.get_width() || PositionInGrid.y >= OutImage.get_height())
@@ -139,14 +140,16 @@ kernel void Raytrace(
 	float3 Up = normalize(cross(Right, Forward));
 	float CameraVerticalFOVRadians = CameraVerticalFOVDegrees * (Pi / 180.0);
 	float CameraFocalLength = 1.0 / tan(CameraVerticalFOVRadians * 0.5);
+
+	uint RNG = (Frame[0]*(PositionInGrid.x + PositionInGrid.y * OutImage.get_width())) ^ 0x9e3779b9u;
 	
 	ray CameraRay;
 	CameraRay.origin = CameraPosition;
+	Screen += float2(Rand(RNG)/OutImage.get_width(), Rand(RNG)/OutImage.get_height());
 	CameraRay.direction = normalize(Forward * CameraFocalLength + Right * Screen.x + Up * Screen.y);
 	CameraRay.min_distance = 0.001;
 	CameraRay.max_distance = 1e6;
 
-	uint RNG = (PositionInGrid.x + PositionInGrid.y * OutImage.get_width()) ^ 0x9e3779b9u;
 
 	int BounceCount = 8;
 	ray Ray = CameraRay;
@@ -184,5 +187,9 @@ kernel void Raytrace(
 
 	}
 
+	if(Frame[0] > 0)
+	{
+		Radiance = Radiance/(Frame[0] + 1) + OutImage.read(PositionInGrid).xyz;
+	}
 	OutImage.write(float4(Radiance, 1.0), PositionInGrid);
 }

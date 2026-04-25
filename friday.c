@@ -91,7 +91,16 @@ Entry(InputWaveInfo)
 		AppendSourceFilesInFolder(&Shared->Arena, &SourceFiles, Str8("embed"));
 
 		GenerateEmbedHeader(&Arena, Str8("embed/"));
-		EmbedFile(&Arena, Str8("shaders/trace.metal"), Str8("embed/shaders.c"), Str8("G_RaytraceShader"));
+
+		str8_list ShaderSourcePaths = {0};
+		Str8ListAppend(&Arena, &ShaderSourcePaths, Str8("shaders/trace.metal"));
+		Str8ListAppend(&Arena, &ShaderSourcePaths, Str8("shaders/tonemap.metal"));
+
+		str8_list ShaderNames = {0};
+		Str8ListAppend(&Arena, &ShaderNames, Str8("G_RaytraceShader"));
+		Str8ListAppend(&Arena, &ShaderNames, Str8("G_TonemapShader"));
+
+		EmbedFiles(&Arena, ShaderSourcePaths, Str8("embed/shaders.c"), ShaderNames);
 
 		Str8ListAppend(&Arena, &ExtraCompileFlags, Str8("-std=c23"));
 

@@ -1,4 +1,5 @@
 #include <Cocoa/Cocoa.h>
+#include <Metal/Metal.h>
 #include <MetalKit/MetalKit.h>
 #include <assert.h>
 #include <float.h>
@@ -33,7 +34,9 @@ typedef struct renderer
 	id<MTLBuffer> MeshInfoBuffer;
 	id<MTLBuffer> InstanceNormalsBuffer;
 	id<MTLFunction> RaytraceEntry;
+	id<MTLFunction> TonemapEntry;
 	id<MTLComputePipelineState> RaytracePipeline;
+	id<MTLComputePipelineState> TonemapPipeline;
 	id<MTLTexture> OutputImage;
 } renderer;
 
@@ -123,7 +126,7 @@ static ufbx_vec3 ExtentsFromBounds(bounds3 Bounds)
 	return Result;
 }
 
-static void RendererInit(renderer *R, MTKView *View, id<MTLAccelerationStructure> Accel, id<MTLBuffer> TLASInstanceBuffer, id<MTLBuffer> TLASScratchBuffer, mesh_gpu_data *Meshes, size_t MeshCount, id<MTLBuffer> GlobalVertexBuffer, id<MTLBuffer> GlobalIndexBuffer, id<MTLBuffer> MeshInfoBuffer, id<MTLBuffer> InstanceNormalsBuffer, id<MTLFunction> RaytraceEntry, id<MTLTexture> OutputImage)
+static void RendererInit(renderer *R, MTKView *View, id<MTLAccelerationStructure> Accel, id<MTLBuffer> TLASInstanceBuffer, id<MTLBuffer> TLASScratchBuffer, mesh_gpu_data *Meshes, size_t MeshCount, id<MTLBuffer> GlobalVertexBuffer, id<MTLBuffer> GlobalIndexBuffer, id<MTLBuffer> MeshInfoBuffer, id<MTLBuffer> InstanceNormalsBuffer, id<MTLFunction> RaytraceEntry, id<MTLFunction> TonemapEntry, id<MTLTexture> OutputImage)
 {
 	R->Device = View.device;
 	R->Queue = [R->Device newCommandQueue];
@@ -137,6 +140,7 @@ static void RendererInit(renderer *R, MTKView *View, id<MTLAccelerationStructure
 	R->MeshInfoBuffer = MeshInfoBuffer;
 	R->InstanceNormalsBuffer = InstanceNormalsBuffer;
 	R->RaytraceEntry = RaytraceEntry;
+	R->TonemapEntry = TonemapEntry;
 	R->OutputImage = OutputImage;
 	View.clearColor = MTLClearColorMake(1.0, 0.0, 0.0, 1.0);
 
@@ -147,30 +151,26 @@ static void RendererInit(renderer *R, MTKView *View, id<MTLAccelerationStructure
 		fprintf(stderr, "%s\n", PipelineError.localizedDescription.UTF8String);
 		exit(1);
 	}
+
+	PipelineError = nil;
+	R->TonemapPipeline = [R->Device newComputePipelineStateWithFunction:R->TonemapEntry error:&PipelineError];
+	if(!R->TonemapPipeline)
+	{
+		fprintf(stderr, "%s\n", PipelineError.localizedDescription.UTF8String);
+		exit(1);
+	}
 }
 
 static void RendererDraw(renderer *R, MTKView *View)
 {
-	static int FrameDebugCount = 0;
-	id<MTLCommandBuffer> CommandBuffer = [R->Queue commandBuffer];
-	MTLRenderPassDescriptor *Pass = View.currentRenderPassDescriptor;
+	static int FrameCount = 0;
 	id<CAMetalDrawable> Drawable = View.currentDrawable;
-	if(!Pass || !Drawable)
+	if(!Drawable)
 	{
 		return;
 	}
-	if(FrameDebugCount < 3)
-	{
-		fprintf(stderr, "frame %d: output=%zux%zu drawable=%zux%zu framebufferOnly=%d\n",
-				FrameDebugCount,
-				R->OutputImage.width,
-				R->OutputImage.height,
-				Drawable.texture.width,
-				Drawable.texture.height,
-				View.framebufferOnly);
-		FrameDebugCount++;
-	}
 
+	id<MTLCommandBuffer> CommandBuffer = [R->Queue commandBuffer];
 	MTLComputePassDescriptor *ComputePassDescriptor = [[MTLComputePassDescriptor alloc] init];
 	id<MTLComputeCommandEncoder> ComputeEncoder = [CommandBuffer computeCommandEncoderWithDescriptor:ComputePassDescriptor];
 	[ComputeEncoder setAccelerationStructure:R->TLAS atBufferIndex:0];
@@ -178,6 +178,7 @@ static void RendererDraw(renderer *R, MTKView *View)
 	[ComputeEncoder setBuffer:R->GlobalIndexBuffer offset:0 atIndex:2];
 	[ComputeEncoder setBuffer:R->MeshInfoBuffer offset:0 atIndex:3];
 	[ComputeEncoder setBuffer:R->InstanceNormalsBuffer offset:0 atIndex:4];
+	[ComputeEncoder setBytes:&FrameCount length:sizeof(int) atIndex:5];
 	[ComputeEncoder setComputePipelineState:R->RaytracePipeline];
 	[ComputeEncoder setTexture:R->OutputImage atIndex:0];
 	[ComputeEncoder useResource:R->TLAS usage:MTLResourceUsageRead];
@@ -197,20 +198,21 @@ static void RendererDraw(renderer *R, MTKView *View)
 	[ComputeEncoder dispatchThreads:GridSize threadsPerThreadgroup:ThreadgroupSize];
 	[ComputeEncoder endEncoding];
 
-	NSUInteger CopyWidth = MIN(R->OutputImage.width, Drawable.texture.width);
-	NSUInteger CopyHeight = MIN(R->OutputImage.height, Drawable.texture.height);
+	id<MTLComputeCommandEncoder> TonemapEncoder = [CommandBuffer computeCommandEncoderWithDescriptor:ComputePassDescriptor];
+	[TonemapEncoder setComputePipelineState:R->TonemapPipeline];
+	[TonemapEncoder setTexture:R->OutputImage atIndex:0];
+	[TonemapEncoder setTexture:Drawable.texture atIndex:1];
 
-	id<MTLBlitCommandEncoder> BlitEncoder = [CommandBuffer blitCommandEncoder];
-	[BlitEncoder copyFromTexture:R->OutputImage
-					 sourceSlice:0
-					 sourceLevel:0
-					sourceOrigin:MTLOriginMake(0, 0, 0)
-					  sourceSize:MTLSizeMake(CopyWidth, CopyHeight, 1)
-					   toTexture:Drawable.texture
-				destinationSlice:0
-				destinationLevel:0
-			   destinationOrigin:MTLOriginMake(0, 0, 0)];
-	[BlitEncoder endEncoding];
+	MTLSize TonemapGridSize = MTLSizeMake(Drawable.texture.width, Drawable.texture.height, 1);
+	NSUInteger TonemapThreadWidth = R->TonemapPipeline.threadExecutionWidth;
+	NSUInteger TonemapThreadHeight = R->TonemapPipeline.maxTotalThreadsPerThreadgroup / TonemapThreadWidth;
+	if(TonemapThreadHeight == 0)
+	{
+		TonemapThreadHeight = 1;
+	}
+	MTLSize TonemapThreadgroupSize = MTLSizeMake(TonemapThreadWidth, TonemapThreadHeight, 1);
+	[TonemapEncoder dispatchThreads:TonemapGridSize threadsPerThreadgroup:TonemapThreadgroupSize];
+	[TonemapEncoder endEncoding];
 
 	[CommandBuffer addCompletedHandler:^(id<MTLCommandBuffer> CompletedBuffer) {
 		if(CompletedBuffer.status == MTLCommandBufferStatusError)
@@ -221,6 +223,7 @@ static void RendererDraw(renderer *R, MTKView *View)
 	[CommandBuffer presentDrawable:Drawable];
 	[CommandBuffer commit];
 	[CommandBuffer waitUntilCompleted];
+	FrameCount += 1;
 }
 
 static NSWindow *CreateWindow(id<MTLDevice> Device, MTKView **ViewOut)
@@ -453,14 +456,18 @@ int main(void)
 
 
 	MTLCompileOptions *Options = [[MTLCompileOptions alloc] init];
-	NSString *ShaderSource = [[NSString alloc] initWithBytes:G_RaytraceShader.Data
-														length:G_RaytraceShader.Length
-													  encoding:NSUTF8StringEncoding];
-	if(!ShaderSource)
+	NSString *RaytraceShaderSource = [[NSString alloc] initWithBytes:G_RaytraceShader.Data
+															  length:G_RaytraceShader.Length
+															encoding:NSUTF8StringEncoding];
+	NSString *TonemapShaderSource = [[NSString alloc] initWithBytes:G_TonemapShader.Data
+															length:G_TonemapShader.Length
+														  encoding:NSUTF8StringEncoding];
+	if(!RaytraceShaderSource || !TonemapShaderSource)
 	{
 		fprintf(stderr, "Failed to decode embedded shader source.\n");
 		exit(1);
 	}
+	NSString *ShaderSource = [RaytraceShaderSource stringByAppendingFormat:@"\n%@", TonemapShaderSource];
 
 	NSError *ShaderError = nil;
 	id<MTLLibrary> Library = [Device newLibraryWithSource:ShaderSource options:Options error:&ShaderError];
@@ -475,14 +482,20 @@ int main(void)
 		fprintf(stderr, "Failed to find Raytrace entry point in compiled shader library.\n");
 		exit(1);
 	}
+	id<MTLFunction> TonemapEntry = [Library newFunctionWithName:@"Tonemap"];
+	if(!TonemapEntry)
+	{
+		fprintf(stderr, "Failed to find Tonemap entry point in compiled shader library.\n");
+		exit(1);
+	}
 
 	MTLTextureDescriptor *OutputImageDescriptor = [[MTLTextureDescriptor alloc] init];
 	OutputImageDescriptor.width = 1600;
 	OutputImageDescriptor.height = 1200;
 	OutputImageDescriptor.textureType = MTLTextureType2D;
-	OutputImageDescriptor.pixelFormat = MTLPixelFormatBGRA8Unorm;
+	OutputImageDescriptor.pixelFormat = MTLPixelFormatRGBA16Float;
 	OutputImageDescriptor.storageMode = MTLStorageModePrivate;
-	OutputImageDescriptor.usage = MTLTextureUsageShaderWrite;
+	OutputImageDescriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
 	id<MTLTexture> OutputImage = [Device newTextureWithDescriptor:OutputImageDescriptor];
 
 	int BLASCount = 0;
@@ -632,6 +645,7 @@ int main(void)
 				 MeshInfoBuffer,
 				 InstanceNormalsBuffer,
 				 RaytraceEntry,
+				 TonemapEntry,
 				 OutputImage);
 
 	for(; WindowNotClosed(Window);)
