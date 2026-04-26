@@ -1,17 +1,22 @@
 [
     {
         "directory": "/Users/olivercruickshank/petey",
-        "command": "clang -std=c23 -ObjC -fobjc-arc -c source/petey.m -g -O0 -obuild/source/petey.o -Iinclude/ -Iembed/  ",
+        "command": "clang -std=c23 -ObjC -fobjc-arc -c source/petey.m -O2 -obuild/source/petey.o -Iinclude/ -Iembed/  ",
         "file": "source/petey.m"
     },
     {
         "directory": "/Users/olivercruickshank/petey",
-        "command": "clang -std=c23  -c ext/ufbx.c -g -O0 -obuild/ext/ufbx.o -Iinclude/ -Iembed/  ",
+        "command": "clang -std=c23  -c ext/ufbx.c -O2 -obuild/ext/ufbx.o -Iinclude/ -Iembed/  ",
         "file": "ext/ufbx.c"
     },
     {
         "directory": "/Users/olivercruickshank/petey",
-        "command": "clang -std=c23  -c embed/shaders.c -g -O0 -obuild/embed/shaders.o -Iinclude/ -Iembed/  ",
+        "command": "clang -std=c23  -c ext/stb_imge.c -O2 -obuild/ext/stb_imge.o -Iinclude/ -Iembed/  ",
+        "file": "ext/stb_imge.c"
+    },
+    {
+        "directory": "/Users/olivercruickshank/petey",
+        "command": "clang -std=c23  -c embed/shaders.c -O2 -obuild/embed/shaders.o -Iinclude/ -Iembed/  ",
         "file": "embed/shaders.c"
     }
 ]

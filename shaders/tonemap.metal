@@ -41,6 +41,14 @@ inline float3 AgxTonemap(float3 Colour)
 	return saturate(Colour);
 }
 
+inline float3 LinearToSrgb(float3 Linear)
+{
+	Linear = saturate(Linear);
+	float3 Low = 12.92 * Linear;
+	float3 High = 1.055 * pow(Linear, float3(1.0 / 2.4)) - 0.055;
+	return select(High, Low, Linear <= 0.0031308);
+}
+
 kernel void Tonemap(texture2d<float, access::read> HdrTexture [[texture(0)]],
                     texture2d<float, access::write> Framebuffer [[texture(1)]],
                     uint2 PositionInGrid [[thread_position_in_grid]])
@@ -54,6 +62,6 @@ kernel void Tonemap(texture2d<float, access::read> HdrTexture [[texture(0)]],
 	}
 
 	float4 Hdr = HdrTexture.read(PositionInGrid);
-	float3 Tonemapped = AgxTonemap(Hdr.rgb);
+	float3 Tonemapped = LinearToSrgb(AgxTonemap(Hdr.rgb));
 	Framebuffer.write(float4(Tonemapped, Hdr.a), PositionInGrid);
 }
