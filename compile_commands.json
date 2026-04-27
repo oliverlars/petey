@@ -6,13 +6,13 @@
     },
     {
         "directory": "/Users/olivercruickshank/petey",
-        "command": "clang -std=c23  -c ext/ufbx.c -O2 -obuild/ext/ufbx.o -Iinclude/ -Iembed/  ",
-        "file": "ext/ufbx.c"
+        "command": "clang -std=c23  -c ext/stb_image.c -O2 -obuild/ext/stb_image.o -Iinclude/ -Iembed/  ",
+        "file": "ext/stb_image.c"
     },
     {
         "directory": "/Users/olivercruickshank/petey",
-        "command": "clang -std=c23  -c ext/stb_imge.c -O2 -obuild/ext/stb_imge.o -Iinclude/ -Iembed/  ",
-        "file": "ext/stb_imge.c"
+        "command": "clang -std=c23  -c ext/ufbx.c -O2 -obuild/ext/ufbx.o -Iinclude/ -Iembed/  ",
+        "file": "ext/ufbx.c"
     },
     {
         "directory": "/Users/olivercruickshank/petey",

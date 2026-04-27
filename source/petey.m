@@ -71,6 +71,9 @@ typedef struct mesh_info {
 typedef struct material {
 	uint32_t    AlbedoIndex;
 	simd_float4 AlbedoColour;
+	uint32_t    RoughnessIndex;
+	float       Roughness;
+	uint32_t    _Pad[2];
 } material;
 
 typedef struct bounds3
@@ -288,7 +291,11 @@ static void RendererDraw(renderer *R, MTKView *View)
 	[ComputeEncoder setTexture:R->OutputImage atIndex:0];
 	for(uint32_t TextureIndex = 0; TextureIndex < R->Textures.Count; TextureIndex++)
 	{
-		[ComputeEncoder setTexture:R->Textures.Items[TextureIndex] atIndex:1 + TextureIndex];
+		id<MTLTexture> Texture = R->Textures.Items[TextureIndex];
+		if(Texture)
+		{
+			[ComputeEncoder setTexture:Texture atIndex:1 + TextureIndex];
+		}
 	}
 	[ComputeEncoder useResource:R->TLAS usage:MTLResourceUsageRead];
 	for(size_t MeshIndex = 0; MeshIndex < R->MeshCount; MeshIndex++)
@@ -386,11 +393,11 @@ static NSWindow *CreateWindow(id<MTLDevice> Device, MTKView **ViewOut)
 	[Window setTitle:@"petey"];
 
 	MTKView *View = [[MTKView alloc] initWithFrame:Frame device:Device];
-	View.colorPixelFormat = MTLPixelFormatBGRA8Unorm;
+	View.colorPixelFormat = MTLPixelFormatBGRA10_XR;
 	View.framebufferOnly = NO;
 	View.paused = NO;
 	View.enableSetNeedsDisplay = NO;
-	View.preferredFramesPerSecond = 60;
+	View.preferredFramesPerSecond = 120;
 
 	[Window setContentView:View];
 	[Window makeKeyAndOrderFront:nil];
@@ -482,6 +489,8 @@ static render_scene LoadRenderSceneFromFbx(ufbx_scene *Scene, const char *Textur
 	printf("Mesh count: %zu\n", Scene->meshes.count);
 	printf("Material count: %zu\n", Scene->materials.count);
 	printf("Texture count: %zu\n", Scene->textures.count);
+	printf("Lights count: %zu\n", Scene->lights.count);
+	printf("Cameras count: %zu\n", Scene->cameras.count);
 
 	gpu_texture_list Textures = {0};
 	uint32_t *TextureToGpuIndex = calloc(Scene->textures.count, sizeof(uint32_t));
@@ -492,13 +501,14 @@ static render_scene LoadRenderSceneFromFbx(ufbx_scene *Scene, const char *Textur
 
 	for(size_t TextureIndex = 0; TextureIndex < Scene->textures.count; TextureIndex++)
 	{
-		if(Textures.Count >= MAX_MATERIAL_TEXTURES)
+		ufbx_texture *UFBXTexture = Scene->textures.data[TextureIndex];
+		uint32_t TextureSlot = UFBXTexture->typed_id;
+		if(TextureSlot >= MAX_MATERIAL_TEXTURES || TextureSlot >= Scene->textures.count)
 		{
-			fprintf(stderr, "Skipping texture %zu: maximum texture count %u reached.\n", TextureIndex, MAX_MATERIAL_TEXTURES);
-			break;
+			fprintf(stderr, "Skipping texture %zu: texture slot %u is out of range.\n", TextureIndex, TextureSlot);
+			continue;
 		}
 
-		ufbx_texture *UFBXTexture = Scene->textures.data[TextureIndex];
 		ufbx_string Filename = PrependPathToFilename(TextureRoot, UFBXTexture->absolute_filename);
 		printf("Texture %zu: %.*s\n", TextureIndex, (int)Filename.length, Filename.data);
 
@@ -513,7 +523,7 @@ static render_scene LoadRenderSceneFromFbx(ufbx_scene *Scene, const char *Textur
 			continue;
 		}
 
-		MTLTextureDescriptor *Desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm_sRGB
+		MTLTextureDescriptor *Desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
 																						width:Width
 																					   height:Height
 																					mipmapped:NO];
@@ -535,8 +545,13 @@ static render_scene LoadRenderSceneFromFbx(ufbx_scene *Scene, const char *Textur
 
 		stbi_image_free(Pixels);
 		free((void *)Filename.data);
-		TextureToGpuIndex[UFBXTexture->typed_id] = Textures.Count;
-		Textures.Items[Textures.Count++] = Texture;
+
+		TextureToGpuIndex[TextureSlot] = TextureSlot;
+		Textures.Items[TextureSlot] = Texture;
+		if(Textures.Count <= TextureSlot)
+		{
+			Textures.Count = TextureSlot + 1;
+		}
 	}
 
 	typedef struct blas_info {
@@ -579,6 +594,7 @@ static render_scene LoadRenderSceneFromFbx(ufbx_scene *Scene, const char *Textur
 			{
 				UV = ufbx_get_vertex_vec2(&Mesh->vertex_uv, Index);
 			}
+			UV.y = 1.0 - UV.y;
 
 			Vertices[BLASInfo.VertexOffset + Index] = (vertex){
 				.Position = (simd_float3){ Position.x, Position.y, Position.z },
@@ -622,7 +638,13 @@ static render_scene LoadRenderSceneFromFbx(ufbx_scene *Scene, const char *Textur
 	for(size_t NodeIndex = 0; NodeIndex < Scene->nodes.count; NodeIndex++)
 	{
 		ufbx_node *Node = Scene->nodes.data[NodeIndex];
+		if(Node->camera)
+		{
+			simd_float3 Position = (simd_float3){ Node->node_to_world.m03, Node->node_to_world.m13, Node->node_to_world.m23 };
+			printf("OMG CAMERA FOUND!: [%f %f %f]\n", Position.x, Position.y, Position.z);
+		}
 		if(!Node->mesh) continue;
+		printf("Node name: %.*s\n", Node->name.length, Node->name.data);
 		TotalInstanceNormalCount += Node->mesh->num_indices;
 		TotalInstanceTriangleCount += Node->mesh->num_triangles;
 	}
@@ -708,9 +730,13 @@ static render_scene LoadRenderSceneFromFbx(ufbx_scene *Scene, const char *Textur
 	for(size_t MaterialIndex = 0; MaterialIndex < Scene->materials.count; MaterialIndex++)
 	{
 		Materials[MaterialIndex].AlbedoIndex = UINT32_MAX;
+		Materials[MaterialIndex].AlbedoColour = (simd_float4){1.0f, 1.0f, 1.0f, 1.0f};
+		Materials[MaterialIndex].RoughnessIndex = UINT32_MAX;
+		Materials[MaterialIndex].Roughness = 0.5f;
+
 		ufbx_material *Material = Scene->materials.data[MaterialIndex];
 		ufbx_material_map Albedo = Material->pbr.base_color;
-		if(!Albedo.texture || !Albedo.texture_enabled)
+		if(!Albedo.has_value && (!Albedo.texture || !Albedo.texture_enabled))
 		{
 			Albedo = Material->fbx.diffuse_color;
 		}
@@ -718,16 +744,31 @@ static render_scene LoadRenderSceneFromFbx(ufbx_scene *Scene, const char *Textur
 		if(Albedo.has_value)
 		{
 			Materials[MaterialIndex].AlbedoColour = (simd_float4) {
-				Albedo.value_vec4.x,
-				Albedo.value_vec4.y,
-				Albedo.value_vec4.z,
-				Albedo.value_vec4.w,
+				(float)Albedo.value_vec4.x,
+				(float)Albedo.value_vec4.y,
+				(float)Albedo.value_vec4.z,
+				Albedo.value_components >= 4 ? (float)Albedo.value_vec4.w : 1.0f,
 			};
 		}
 
 		if(Albedo.texture && Albedo.texture_enabled && Albedo.texture->typed_id < Scene->textures.count)
 		{
 			Materials[MaterialIndex].AlbedoIndex = TextureToGpuIndex[Albedo.texture->typed_id];
+		}
+
+		ufbx_material_map Roughness = Material->pbr.roughness;
+		if(Roughness.has_value)
+		{
+			Materials[MaterialIndex].Roughness = Roughness.value_real;
+		}
+
+		if(Roughness.texture && Roughness.texture_enabled && Roughness.texture->typed_id < Scene->textures.count)
+		{
+			if(!Roughness.has_value)
+			{
+				Materials[MaterialIndex].Roughness = 1.0f;
+			}
+			Materials[MaterialIndex].RoughnessIndex = TextureToGpuIndex[Roughness.texture->typed_id];
 		}
 	}
 
@@ -781,9 +822,10 @@ static render_scene LoadRenderSceneFromFbx(ufbx_scene *Scene, const char *Textur
 int main(void)
 {
 	ufbx_load_opts Opts = { 0 };
+	Opts.use_blender_pbr_material = true;
 	ufbx_error Error;
-	const char *FbxPath = "/Users/olivercruickshank/Downloads/car.fbx";
-	const char *TextureRoot = "/Users/olivercruickshank/Downloads/car/";
+	const char *FbxPath = "/Users/olivercruickshank/Downloads/mustang/mustang2.fbx";
+	const char *TextureRoot = "/Users/olivercruickshank/Downloads/mustang/textures/";
 	ufbx_scene *Scene = ufbx_load_file(FbxPath, &Opts, &Error);
 	if(!Scene)
 	{
