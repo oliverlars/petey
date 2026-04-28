@@ -31,6 +31,16 @@ typedef struct gpu_texture_list
 	uint32_t Count;
 } gpu_texture_list;
 
+typedef struct uniforms {
+	simd_float3 CameraOrigin;
+	simd_float3 CameraRight;
+	simd_float3 CameraUp;
+	simd_float3 CameraForward;
+	float CameraFOVTanX;
+	float CameraFOVTanY;
+	int Frame;
+	float Time;
+} uniforms;
 typedef struct renderer
 {
 	id<MTLDevice> Device;
@@ -52,6 +62,7 @@ typedef struct renderer
 	id<MTLComputePipelineState> TonemapPipeline;
 	id<MTLTexture> OutputImage;
 	gpu_texture_list Textures;
+	uniforms Uniforms;
 } renderer;
 
 typedef struct vertex {
@@ -69,11 +80,12 @@ typedef struct mesh_info {
 } mesh_info;
 
 typedef struct material {
-	uint32_t    AlbedoIndex;
 	simd_float4 AlbedoColour;
+	simd_float4 EmissiveColour;
+	uint32_t    AlbedoIndex;
 	uint32_t    RoughnessIndex;
 	float       Roughness;
-	uint32_t    _Pad[2];
+	uint32_t    _Pad[3];
 } material;
 
 typedef struct bounds3
@@ -98,10 +110,13 @@ typedef struct render_scene
 	id<MTLBuffer> InstanceNormalsBuffer;
 	id<MTLBuffer> TriangleMaterialBuffer;
 	id<MTLBuffer> MaterialsBuffer;
+	ufbx_matrix   CameraMatrix;
+	ufbx_camera   *Camera;
 } render_scene;
 
 static mesh_gpu_data G_Meshes[4096];
 static id<MTLAccelerationStructure> G_BLASs[4096];
+static id G_AppDelegate;
 static id G_ViewDelegate;
 
 static ufbx_string PrependPathToFilename(const char *Path, ufbx_string Filename)
@@ -221,42 +236,15 @@ static ufbx_vec3 ExtentsFromBounds(bounds3 Bounds)
 	return Result;
 }
 
-static void RendererInit(renderer *R, MTKView *View, gpu_texture_list Textures, id<MTLAccelerationStructure> Accel, id<MTLBuffer> TLASInstanceBuffer, id<MTLBuffer> TLASScratchBuffer, mesh_gpu_data *Meshes, size_t MeshCount, id<MTLBuffer> GlobalVertexBuffer, id<MTLBuffer> GlobalIndexBuffer, id<MTLBuffer> MeshInfoBuffer, id<MTLBuffer> InstanceNormalsBuffer, id<MTLBuffer> TriangleMaterialBuffer, id<MTLBuffer> MaterialsBuffer, id<MTLFunction> RaytraceEntry, id<MTLFunction> TonemapEntry, id<MTLTexture> OutputImage)
+static simd_float3 SimdFloat3FromUFBXVec3(ufbx_vec3 V)
 {
-	R->Device = View.device;
-	R->Queue = [R->Device newCommandQueue];
-	R->TLAS = Accel;
-	R->TLASInstanceBuffer = TLASInstanceBuffer;
-	R->TLASScratchBuffer = TLASScratchBuffer;
-	R->Meshes = Meshes;
-	R->MeshCount = MeshCount;
-	R->GlobalVertexBuffer = GlobalVertexBuffer;
-	R->GlobalIndexBuffer = GlobalIndexBuffer;
-	R->MeshInfoBuffer = MeshInfoBuffer;
-	R->InstanceNormalsBuffer = InstanceNormalsBuffer;
-	R->TriangleMaterialBuffer = TriangleMaterialBuffer;
-	R->MaterialsBuffer = MaterialsBuffer;
-	R->RaytraceEntry = RaytraceEntry;
-	R->TonemapEntry = TonemapEntry;
-	R->OutputImage = OutputImage;
-	R->Textures = Textures;
-	View.clearColor = MTLClearColorMake(1.0, 0.0, 0.0, 1.0);
+	return (simd_float3){ (float)V.x, (float)V.y, (float)V.z };
+}
 
-	NSError *PipelineError = nil;
-	R->RaytracePipeline = [R->Device newComputePipelineStateWithFunction:R->RaytraceEntry error:&PipelineError];
-	if(!R->RaytracePipeline)
-	{
-		fprintf(stderr, "%s\n", PipelineError.localizedDescription.UTF8String);
-		exit(1);
-	}
-
-	PipelineError = nil;
-	R->TonemapPipeline = [R->Device newComputePipelineStateWithFunction:R->TonemapEntry error:&PipelineError];
-	if(!R->TonemapPipeline)
-	{
-		fprintf(stderr, "%s\n", PipelineError.localizedDescription.UTF8String);
-		exit(1);
-	}
+static simd_float3 CameraDirectionFromLocalAxis(ufbx_matrix CameraMatrix, ufbx_vec3 LocalAxis)
+{
+	ufbx_vec3 Direction = ufbx_transform_direction(&CameraMatrix, LocalAxis);
+	return simd_normalize(SimdFloat3FromUFBXVec3(Direction));
 }
 
 static void RendererDraw(renderer *R, MTKView *View)
@@ -276,6 +264,9 @@ static void RendererDraw(renderer *R, MTKView *View)
 		return;
 	}
 
+	R->Uniforms.Frame = FrameCount;
+	R->Uniforms.Time = Time;
+
 	id<MTLCommandBuffer> CommandBuffer = [R->Queue commandBuffer];
 	id<MTLComputeCommandEncoder> ComputeEncoder = [CommandBuffer computeCommandEncoder];
 	[ComputeEncoder setAccelerationStructure:R->TLAS atBufferIndex:0];
@@ -285,8 +276,7 @@ static void RendererDraw(renderer *R, MTKView *View)
 	[ComputeEncoder setBuffer:R->InstanceNormalsBuffer offset:0 atIndex:4];
 	[ComputeEncoder setBuffer:R->TriangleMaterialBuffer offset:0 atIndex:5];
 	[ComputeEncoder setBuffer:R->MaterialsBuffer offset:0 atIndex:6];
-	[ComputeEncoder setBytes:&FrameCount length:sizeof(int) atIndex:7];
-	[ComputeEncoder setBytes:&Time length:sizeof(float) atIndex:8];
+	[ComputeEncoder setBytes:&R->Uniforms length:sizeof(uniforms) atIndex:7];
 	[ComputeEncoder setComputePipelineState:R->RaytracePipeline];
 	[ComputeEncoder setTexture:R->OutputImage atIndex:0];
 	for(uint32_t TextureIndex = 0; TextureIndex < R->Textures.Count; TextureIndex++)
@@ -376,10 +366,23 @@ static void RendererDraw(renderer *R, MTKView *View)
 }
 @end
 
+@interface petey_app_delegate : NSObject <NSApplicationDelegate>
+@end
+
+@implementation petey_app_delegate
+- (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)Sender
+{
+	(void)Sender;
+	return YES;
+}
+@end
+
 static NSWindow *CreateWindow(id<MTLDevice> Device, MTKView **ViewOut)
 {
 	[NSApplication sharedApplication];
 	[NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+	G_AppDelegate = [petey_app_delegate new];
+	[NSApp setDelegate:G_AppDelegate];
 	[NSApp finishLaunching];
 
 	NSRect Frame = NSMakeRect(0, 0, 800, 600);
@@ -407,13 +410,24 @@ static NSWindow *CreateWindow(id<MTLDevice> Device, MTKView **ViewOut)
 	return Window;
 }
 
-static MTLPackedFloat4x3 PackedMatrixFromUfbx(ufbx_matrix M)
+static MTLPackedFloat4x3 PackedMatrixFromUFBX(ufbx_matrix M)
 {
 	MTLPackedFloat4x3 Result;
 	Result.columns[0] = MTLPackedFloat3Make(M.m00, M.m10, M.m20);
 	Result.columns[1] = MTLPackedFloat3Make(M.m01, M.m11, M.m21);
 	Result.columns[2] = MTLPackedFloat3Make(M.m02, M.m12, M.m22);
 	Result.columns[3] = MTLPackedFloat3Make(M.m03, M.m13, M.m23);
+	return Result;
+}
+
+simd_float4x4 Float4x4FromUFBX(ufbx_matrix M)
+{
+	simd_float4x4 Result;
+	Result.columns[0] = (simd_float4){M.m00, M.m10, M.m20, 0};
+	Result.columns[1] = (simd_float4){M.m01, M.m11, M.m21, 0};
+	Result.columns[2] = (simd_float4){M.m02, M.m12, M.m22, 0};
+	Result.columns[3] = (simd_float4){M.m03, M.m13, M.m23, 0};
+	Result.columns[3] = (simd_float4){0,     0,     0,     1};
 	return Result;
 }
 
@@ -640,11 +654,11 @@ static render_scene LoadRenderSceneFromFbx(ufbx_scene *Scene, const char *Textur
 		ufbx_node *Node = Scene->nodes.data[NodeIndex];
 		if(Node->camera)
 		{
-			simd_float3 Position = (simd_float3){ Node->node_to_world.m03, Node->node_to_world.m13, Node->node_to_world.m23 };
-			printf("OMG CAMERA FOUND!: [%f %f %f]\n", Position.x, Position.y, Position.z);
+			Result.CameraMatrix = Node->node_to_world;
+			Result.Camera = Node->camera;
 		}
 		if(!Node->mesh) continue;
-		printf("Node name: %.*s\n", Node->name.length, Node->name.data);
+		printf("Node name: %.*s\n", (int)Node->name.length, Node->name.data);
 		TotalInstanceNormalCount += Node->mesh->num_indices;
 		TotalInstanceTriangleCount += Node->mesh->num_triangles;
 	}
@@ -669,15 +683,12 @@ static render_scene LoadRenderSceneFromFbx(ufbx_scene *Scene, const char *Textur
 		assert(Scene->meshes.data[Node->mesh->typed_id] == Node->mesh);
 		ufbx_mesh *Mesh = Node->mesh;
 
-		ufbx_matrix Inv = ufbx_matrix_invert(&Node->geometry_to_world);
+		ufbx_matrix NormalMatrix = ufbx_matrix_for_normals(&Node->geometry_to_world);
 		for(size_t Idx = 0; Idx < Mesh->num_indices; Idx++)
 		{
 			ufbx_vec3 N = ufbx_get_vertex_vec3(&Mesh->vertex_normal, Idx);
-			simd_float3 W;
-			W.x = (float)(Inv.m00*N.x + Inv.m10*N.y + Inv.m20*N.z);
-			W.y = (float)(Inv.m01*N.x + Inv.m11*N.y + Inv.m21*N.z);
-			W.z = (float)(Inv.m02*N.x + Inv.m12*N.y + Inv.m22*N.z);
-			InstanceNormals[InstanceNormalCursor + Idx] = simd_normalize(W);
+			ufbx_vec3 W = ufbx_transform_direction(&NormalMatrix, N);
+			InstanceNormals[InstanceNormalCursor + Idx] = simd_normalize(SimdFloat3FromUFBXVec3(W));
 		}
 
 		blas_info BLASInfo = BLASInfos[Node->mesh->typed_id];
@@ -719,7 +730,7 @@ static render_scene LoadRenderSceneFromFbx(ufbx_scene *Scene, const char *Textur
 		free(FaceIndices);
 
 		MTLAccelerationStructureInstanceDescriptor *Instance = InstanceDescs + InstanceCount++;
-		Instance->transformationMatrix = PackedMatrixFromUfbx(Node->geometry_to_world);
+		Instance->transformationMatrix = PackedMatrixFromUFBX(Node->geometry_to_world);
 		Instance->options = MTLAccelerationStructureInstanceOptionOpaque;
 		Instance->mask = 0xff;
 		Instance->intersectionFunctionTableOffset = 0;
@@ -733,6 +744,8 @@ static render_scene LoadRenderSceneFromFbx(ufbx_scene *Scene, const char *Textur
 		Materials[MaterialIndex].AlbedoColour = (simd_float4){1.0f, 1.0f, 1.0f, 1.0f};
 		Materials[MaterialIndex].RoughnessIndex = UINT32_MAX;
 		Materials[MaterialIndex].Roughness = 0.5f;
+		Materials[MaterialIndex].EmissiveColour = (simd_float4){0.0f, 0.0f, 0.0f, 0.0f};
+
 
 		ufbx_material *Material = Scene->materials.data[MaterialIndex];
 		ufbx_material_map Albedo = Material->pbr.base_color;
@@ -769,6 +782,25 @@ static render_scene LoadRenderSceneFromFbx(ufbx_scene *Scene, const char *Textur
 				Materials[MaterialIndex].Roughness = 1.0f;
 			}
 			Materials[MaterialIndex].RoughnessIndex = TextureToGpuIndex[Roughness.texture->typed_id];
+		}
+
+		ufbx_material_map EmissionFactor = Material->pbr.emission_factor;
+		ufbx_material_map EmissionColor = Material->pbr.emission_color;
+		if(!EmissionFactor.has_value && !EmissionColor.has_value)
+		{
+			EmissionFactor = Material->fbx.emission_factor;
+			EmissionColor = Material->fbx.emission_color;
+		}
+
+		if(EmissionFactor.has_value && EmissionFactor.value_real > 0.0)
+		{
+			ufbx_vec4 EmissiveColour = EmissionColor.has_value ? EmissionColor.value_vec4 : (ufbx_vec4){1.0, 1.0, 1.0, 1.0};
+			Materials[MaterialIndex].EmissiveColour = (simd_float4) {
+				(float)(EmissiveColour.x * EmissionFactor.value_real),
+				(float)(EmissiveColour.y * EmissionFactor.value_real),
+				(float)(EmissiveColour.z * EmissionFactor.value_real),
+				EmissionColor.value_components >= 4 ? (float)EmissiveColour.w : 1.0f,
+			};
 		}
 	}
 
@@ -823,6 +855,8 @@ int main(void)
 {
 	ufbx_load_opts Opts = { 0 };
 	Opts.use_blender_pbr_material = true;
+	Opts.target_axes = ufbx_axes_right_handed_y_up;
+	Opts.target_camera_axes = ufbx_axes_right_handed_y_up;
 	ufbx_error Error;
 	const char *FbxPath = "/Users/olivercruickshank/Downloads/mustang/mustang2.fbx";
 	const char *TextureRoot = "/Users/olivercruickshank/Downloads/mustang/textures/";
@@ -884,24 +918,59 @@ int main(void)
 	NSWindow *Window = CreateWindow(Device, &View);
 
 	renderer Renderer = {0};
-	RendererInit(&Renderer,
-		View,
-		SceneData.Textures,
-		SceneData.TLAS,
-		SceneData.TLASInstanceBuffer,
-		SceneData.TLASScratchBuffer,
-		SceneData.Meshes,
-		SceneData.MeshCount,
-		SceneData.GlobalVertexBuffer,
-		SceneData.GlobalIndexBuffer,
-		SceneData.MeshInfoBuffer,
-		SceneData.InstanceNormalsBuffer,
-		SceneData.TriangleMaterialBuffer,
-		SceneData.MaterialsBuffer,
-		RaytraceEntry,
-		TonemapEntry,
-		OutputImage);
 
+	Renderer.Device = View.device;
+	Renderer.Queue = [Renderer.Device newCommandQueue];
+	Renderer.TLAS = SceneData.TLAS;
+	Renderer.TLASInstanceBuffer = SceneData.TLASInstanceBuffer;
+	Renderer.TLASScratchBuffer = SceneData.TLASScratchBuffer;
+	Renderer.Meshes = SceneData.Meshes;
+	Renderer.MeshCount = SceneData.MeshCount;
+	Renderer.GlobalVertexBuffer = SceneData.GlobalVertexBuffer;
+	Renderer.GlobalIndexBuffer = SceneData.GlobalIndexBuffer;
+	Renderer.MeshInfoBuffer = SceneData.MeshInfoBuffer;
+	Renderer.InstanceNormalsBuffer = SceneData.InstanceNormalsBuffer;
+	Renderer.TriangleMaterialBuffer = SceneData.TriangleMaterialBuffer;
+	Renderer.MaterialsBuffer = SceneData.MaterialsBuffer;
+	Renderer.RaytraceEntry = RaytraceEntry;
+	Renderer.TonemapEntry = TonemapEntry;
+	Renderer.OutputImage = OutputImage;
+	Renderer.Textures = SceneData.Textures;
+	if(!SceneData.Camera)
+	{
+		fprintf(stderr, "No camera found in FBX scene.\n");
+		exit(1);
+	}
+	Renderer.Uniforms.CameraOrigin = SimdFloat3FromUFBXVec3(SceneData.CameraMatrix.cols[3]);
+#define ExpandSimdFloat3(_v_) _v_.x, _v_.y, _v_.z
+	Renderer.Uniforms.CameraRight = CameraDirectionFromLocalAxis(SceneData.CameraMatrix, (ufbx_vec3){ 1.0, 0.0, 0.0 });
+	Renderer.Uniforms.CameraUp = CameraDirectionFromLocalAxis(SceneData.CameraMatrix, (ufbx_vec3){ 0.0, 1.0, 0.0 });
+	Renderer.Uniforms.CameraForward = CameraDirectionFromLocalAxis(SceneData.CameraMatrix, (ufbx_vec3){ 0.0, 0.0, -1.0 });
+	Renderer.Uniforms.CameraFOVTanX = SceneData.Camera->field_of_view_tan.x;
+	Renderer.Uniforms.CameraFOVTanY = SceneData.Camera->field_of_view_tan.y;
+
+	printf("CameraOrigin: [%f %f %f]\n", ExpandSimdFloat3(Renderer.Uniforms.CameraOrigin));
+	printf("CameraRight: [%f %f %f]\n", ExpandSimdFloat3(Renderer.Uniforms.CameraRight));
+	printf("CameraUp: [%f %f %f]\n", ExpandSimdFloat3(Renderer.Uniforms.CameraUp));
+	printf("CameraForward: [%f %f %f]\n", ExpandSimdFloat3(Renderer.Uniforms.CameraForward));
+	printf("CameraFOVTan: [%f %f]\n", Renderer.Uniforms.CameraFOVTanX, Renderer.Uniforms.CameraFOVTanY);
+	View.clearColor = MTLClearColorMake(1.0, 0.0, 0.0, 1.0);
+
+	NSError *PipelineError = nil;
+	Renderer.RaytracePipeline = [Renderer.Device newComputePipelineStateWithFunction:Renderer.RaytraceEntry error:&PipelineError];
+	if(!Renderer.RaytracePipeline)
+	{
+		fprintf(stderr, "%s\n", PipelineError.localizedDescription.UTF8String);
+		exit(1);
+	}
+
+	PipelineError = nil;
+	Renderer.TonemapPipeline = [Renderer.Device newComputePipelineStateWithFunction:Renderer.TonemapEntry error:&PipelineError];
+	if(!Renderer.TonemapPipeline)
+	{
+		fprintf(stderr, "%s\n", PipelineError.localizedDescription.UTF8String);
+		exit(1);
+	}
 	petey_mtk_view_delegate *ViewDelegate = [petey_mtk_view_delegate new];
 	ViewDelegate->Renderer = &Renderer;
 	G_ViewDelegate = ViewDelegate;
